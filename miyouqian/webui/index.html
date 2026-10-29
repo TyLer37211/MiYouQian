@@ -52,6 +52,10 @@
       <symbol id="i-x" viewBox="0 0 24 24">
         <path d="M18 6 6 18M6 6l12 12"></path>
       </symbol>
+      <symbol id="i-user" viewBox="0 0 24 24">
+        <circle cx="12" cy="8" r="4"></circle>
+        <path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"></path>
+      </symbol>
     </svg>
 
     <main class="shell">
@@ -117,7 +121,7 @@
 
         <section class="app-layout">
           <div class="config-column">
-            <details class="panel" open>
+            <details class="panel" data-panel="accounts" open>
               <summary>
                 <span>
                   <strong>账号</strong>
@@ -125,21 +129,10 @@
                 </span>
                 <span class="disclosure" aria-hidden="true"></span>
               </summary>
-              <div class="section-toolbar">
-                <button
-                  class="ghost"
-                  id="addAccountBtn"
-                  type="button"
-                  title="添加账号"
-                >
-                  <svg><use href="#i-plus"></use></svg>
-                  <span>添加</span>
-                </button>
-              </div>
               <div id="accounts"></div>
             </details>
 
-            <details class="panel" open>
+            <details class="panel" data-panel="tasks" open>
               <summary>
                 <span>
                   <strong>任务配置</strong>
@@ -147,59 +140,10 @@
                 </span>
                 <span class="disclosure" aria-hidden="true"></span>
               </summary>
-              <div class="task-group" id="gameTaskGroup">
-                <label class="check-row task-switch">
-                  <input id="gameCheckin" type="checkbox" data-autosave />
-                  <span>游戏社区签到</span>
-                </label>
-                <div class="chips" id="gameChips"></div>
-              </div>
-              <div class="task-group" id="cloudGameTaskGroup">
-                <label class="check-row task-switch">
-                  <input id="cloudGameCheckin" type="checkbox" data-autosave />
-                  <span>云游戏签到</span>
-                </label>
-                <div class="chips" id="cloudGameChips"></div>
-              </div>
-              <div class="task-group" id="bbsTaskGroup">
-                <label class="check-row task-switch">
-                  <input id="bbsTasks" type="checkbox" data-autosave />
-                  <span>米游币任务</span>
-                </label>
-                <div class="form-grid two compact" id="bbsTaskOptions">
-                  <label class="check-row"
-                    ><input
-                      id="bbsCheckin"
-                      type="checkbox"
-                      data-autosave
-                    /><span>社区签到</span></label
-                  >
-                  <label
-                    class="check-row disabled"
-                    title="米游社改版，社区互动已无法获取米游币，待新获取方式更新~"
-                  >
-                    <input id="bbsRead" type="checkbox" data-autosave disabled />
-                    <span>看帖</span>
-                  </label>
-                  <label
-                    class="check-row disabled"
-                    title="米游社改版，社区互动已无法获取米游币，待新获取方式更新~"
-                  >
-                    <input id="bbsLike" type="checkbox" data-autosave disabled />
-                    <span>点赞</span>
-                  </label>
-                  <label
-                    class="check-row disabled"
-                    title="米游社改版，社区互动已无法获取米游币，待新获取方式更新~"
-                  >
-                    <input id="bbsShare" type="checkbox" data-autosave disabled />
-                    <span>分享</span>
-                  </label>
-                </div>
-              </div>
+              <div class="choice-buttons task-buttons" id="taskButtons"></div>
             </details>
 
-            <details class="panel">
+            <details class="panel" data-panel="schedule">
               <summary>
                 <span>
                   <strong>每日调度</strong>
@@ -230,37 +174,25 @@
               </div>
               <label class="check-row">
                 <input id="runOnStart" type="checkbox" data-autosave />
-                <span>启动后执行一次</span>
+                <span>
+                  程序启动时立即执行一次
+                  <small>仅在程序启动时生效，与每日自动执行无关</small>
+                </span>
               </label>
             </details>
 
-            <details class="panel">
+            <details class="panel" data-panel="push">
               <summary>
                 <span>
                   <strong>推送通道</strong>
-                  <small>任务结束后通知</small>
+                  <small>任务结束后通知，点击通道按钮配置</small>
                 </span>
                 <span class="disclosure" aria-hidden="true"></span>
               </summary>
-              <div class="section-toolbar">
-                <button
-                  class="ghost"
-                  id="pushTestBtn"
-                  type="button"
-                  title="测试所有启用的推送渠道"
-                >
-                  <svg><use href="#i-play"></use></svg>
-                  <span>测试推送</span>
-                </button>
-              </div>
-              <label class="check-row">
-                <input id="pushErrorOnly" type="checkbox" data-autosave />
-                <span>仅失败时推送</span>
-              </label>
-              <div class="push-channel-list" id="pushChannels"></div>
+              <div class="choice-buttons" id="pushChannels"></div>
             </details>
 
-            <details class="panel">
+            <details class="panel" data-panel="captcha">
               <summary>
                 <span>
                   <strong>验证码识别</strong>
@@ -299,7 +231,7 @@
         </section>
       </section>
 
-      <section class="view-panel is-hidden" data-view-panel="shop">
+      <section class="view-panel shop-view is-hidden" data-view-panel="shop">
         <section class="status-grid shop-status" aria-label="商品兑换状态">
           <div class="metric">
             <span>自动兑换</span>
@@ -328,21 +260,24 @@
                   <p>商品图片、兑换时间、库存、价格与限购信息</p>
                 </div>
                 <div class="shop-tools">
-                  <div class="select-wrapper">
+                  <div class="select-wrapper shop-filter-game">
                     <select id="shopGameFilter" aria-label="商品分区"></select>
                     <svg class="select-arrow" width="12" height="8" aria-hidden="true">
                       <use href="#arrow-down"/>
                     </svg>
                   </div>
-                </div>
-                <div class="shop-tools">
-
-                  <button
-                          class="ghost"
-                          id="shopRefreshBtn"
-                          type="button"
-                          title="刷新商品"
-                  >
+                  <!-- 新增状态筛选 -->
+                  <div class="select-wrapper shop-filter-status">
+                    <select id="shopStatusFilter" aria-label="商品状态">
+                      <option value="">全部</option>
+                      <option value="sold_out">已售罄</option>
+                      <option value="available">可兑换</option>
+                    </select>
+                    <svg class="select-arrow" width="12" height="8" aria-hidden="true">
+                      <use href="#arrow-down"/>
+                    </svg>
+                  </div>
+                  <button class="ghost" id="shopRefreshBtn" type="button" title="刷新商品">
                     <svg><use href="#i-refresh"></use></svg>
                     <span>刷新商品</span>
                   </button>
@@ -388,7 +323,7 @@
                   />
                 </label>
               </div>
-              <label class="check-row" style="margin-top: 12px">
+              <label class="check-row">
                 <input id="shopPush" type="checkbox" data-autosave />
                 <span>发送兑换结果推送（复用签到推送配置）</span>
               </label>

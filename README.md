@@ -75,7 +75,7 @@
 
 云游戏 Token 获取方法（参考 MihoyoBBSTools）：
 
-1. 在浏览器打开对应云游戏网页并登录账号，[云原神](https://ys.mihoyo.com/cloud/#/)，[云绝区零](https://zzz.mihoyo.com/cloud-feat/#/)。
+1. 云绝区零无网页版需抓包获取，参考 https://bili33.top/posts/MHYY-AutoCheckin-Manual-Gen2/#%E9%85%8D%E7%BD%AE%E8%8E%B7%E5%8F%96；云原神在浏览器打开[对应云游戏网页](https://ys.mihoyo.com/cloud/#/)并登录账号。
 2. 打开开发者工具，切到 `Network` / `网络`。
 3. 刷新页面或进入钱包/时长页面，过滤 `wallet/wallet/get`。
 4. 点开返回成功的请求，在请求头里复制 `X-Rpc-Combo_token` 的值。
@@ -134,7 +134,8 @@ shop_exchange:
 | --- | --- | --- |
 | `goods_id` | 商品 ID | "12345" |
 | `goods_name` | 商品名称（可选，用于显示） | "原神礼包" |
-| `account` | 执行兑换的账号名称 | "main" |
+| `account_stuid` | 执行兑换的账号 UID，计划靠它认账号，由 Web 控制台自动填写 | "100000002" |
+| `account_index` | 该账号在账号列表中的位置（从 0 开始），由程序根据 `account_stuid` 自动维护 | 0 |
 | `address_id` | 收货地址 ID（实物商品必需） | "67890" |
 | `uid` | 游戏 UID（游戏内商品必需） | "100000001" |
 | `region` | 游戏区服（游戏内商品必需） | "cn_gf01" |
@@ -154,13 +155,16 @@ shop_exchange:
   plans:
     - goods_id: "12345"
       goods_name: "原神礼包"
-      account: "main"
+      account_stuid: "100000002"
+      account_index: 0
       address_id: "67890"
       exchange_at: 1700000000
       enable: true
       auto: true
       device_fp: ""
 ```
+
+计划绑定的是账号的 UID（`account_stuid`），不是账号在列表里的位置。删除或调整账号顺序后，计划会自动跟着原来的账号走；如果绑定的账号已被删除，或同一位置换成了另一个米游社账号，该计划会被停用并提示「所属账号已删除或更换」，不会改用别的账号兑换。需要换账号时请在 Web 控制台重新选择执行账号，手动改配置文件时 `account_stuid` 和 `account_index` 要一起改，只改 `account_index` 会被 `account_stuid` 覆盖。
 
 ### 使用方式
 
@@ -190,6 +194,8 @@ shop_exchange:
 ### 注意事项
 
 - 兑换功能需要账号已登录且凭证有效
+- 删除账号、更换登录账号后，请检查对应兑换计划的执行账号和游戏角色，被停用的计划需要重新选择账号后再启用
+- 早期版本创建的计划没有 `account_stuid`，升级后会绑定到它当前所在位置的账号，请确认执行账号和游戏角色对得上
 - 实物商品需要提前在米游社配置收货地址
 - 游戏内商品需要确保角色信息正确
 - 定时兑换时间建议设置在商品上架时间点
@@ -212,6 +218,9 @@ A: 检查日志中的错误信息，常见原因包括：库存不足、时间�
 
 **Q: 可以同时添加多个兑换计划吗？**  
 A: 可以，每个账号可以添加多个兑换计划，系统会按时间顺序执行。
+
+**Q: 删除账号后，兑换计划会怎样？**  
+A: 绑定该账号的计划会被停用并显示「账号已删除」，其他账号的计划不受影响，会继续用各自的账号兑换。
 
 ## 米游币任务
 
@@ -597,7 +606,7 @@ http://127.0.0.1:5890
 1. 勾选“启用每日自动执行”
 2. 设置执行时间
 3. 设置随机波动分钟
-4. 按需选择“启动后执行一次”
+4. 按需选择“程序启动时立即执行一次”（仅在程序启动时生效，与每日自动执行无关）
 
 示例：执行时间为 `09:00`，随机波动为 `45`，表示每天 09:00 到 09:45 之间随机执行一次。
 
@@ -755,7 +764,7 @@ accounts:
 
 云游戏 Token 获取方法：
 
-1. 在浏览器打开对应云游戏网页并登录账号，例如云原神。
+1. 云绝区零无网页版需抓包获取，参考 https://bili33.top/posts/MHYY-AutoCheckin-Manual-Gen2/#%E9%85%8D%E7%BD%AE%E8%8E%B7%E5%8F%96；云原神在浏览器打开[对应云游戏网页](https://ys.mihoyo.com/cloud/#/)并登录账号。
 2. 打开开发者工具，切到 `Network` / `网络`。
 3. 刷新页面或进入钱包/时长页面，过滤 `wallet/wallet/get`。
 4. 点开返回成功的请求，在请求头里复制 `X-Rpc-Combo_token` 的值。
@@ -800,10 +809,11 @@ bbs:
 | `5` | 大别野 |
 | `6` | 崩坏：星穹铁道 |
 | `8` | 绝区零 |
+| `9` | 崩坏：因缘精灵 |
 
 ### 验证码识别
 
-项目默认不会自动处理验证码。验证码识别按渠道配置，当前只适配打码狗；后续新增平台时会在同一组渠道中扩展。
+项目默认不会自动处理验证码。验证码识别按渠道配置，目前支持打码狗和自定义接口；同一时间只会使用一个渠道，Web 控制台中勾选其中一个会自动取消另一个。
 
 ```yaml
 captcha:
@@ -813,6 +823,11 @@ captcha:
       enable: false
       userkey: ""
       timeout: 60
+    - provider: custom
+      enable: false
+      url: ""
+      api_key: ""
+      timeout: 120
 ```
 
 说明：
@@ -820,14 +835,27 @@ captcha:
 | 设置 | 说明 |
 | --- | --- |
 | `max_retries` | 每次触发验证码后最多重新获取并识别的次数 |
-| `channels[].provider` | 打码渠道，目前支持 `damagou` |
+| `channels[].provider` | 打码渠道，目前支持 `damagou`、`custom` |
 | `channels[].enable` | 是否启用该渠道 |
-| `channels[].userkey` | 打码狗用户 `userkey` |
-| `channels[].timeout` | 调用打码接口的超时时间，单位秒 |
+| `channels[].userkey` | 打码狗用户 `userkey`（仅 `damagou`） |
+| `channels[].url` | 自定义接口的完整地址，按填写内容原样请求，路径不限（仅 `custom`） |
+| `channels[].api_key` | 自定义接口的 API Key，选填；填写后通过请求头 `X-API-Key` 发送，留空则不发送（仅 `custom`） |
+| `channels[].timeout` | 调用打码接口的超时时间，单位秒；`damagou` 默认 60，`custom` 默认 120 |
 
 打码狗的 `type` 默认不需要设置；识别困难时可以在配置文件中给该渠道补 `type: "1006"`，会增加积分消耗。
 
+#### 自定义接口
+
+选择「自定义接口」后，项目会按固定规范调用你填写的打码服务：`GET {url}?gt=...&challenge=...`，按需通过请求头 `X-API-Key` 鉴权，响应为统一的 `code` / `message` / `request_id` / `data` 信封，`code = 0` 时取 `data.validate` 作为识别结果。完整的请求、响应与错误码规范见 [`miyouqian/webui/custom-captcha-api.md`](miyouqian/webui/custom-captcha-api.md)；在 Web 控制台选中「自定义接口」后，也可以点击「查看规范」在页面内阅读，或点击「复制规范」一键复制全文。
+
+调用时的处理方式：
+
+- `42901`（频率限制）、`50301` / `50302`（服务繁忙或排队超时）：按响应头 `Retry-After` 等待后用同一个验证码重试（服务端此时还没开始识别），等待超过 60 秒则不再等待；单次识别最多请求 3 次。
+- 其余非 `0` 的 `code`（包括 `50001` / `50000`）一律视为失败，不会在接口层重试：极验的验证码用过一次就作废，原样重发只会被秒拒。失败信息会带上 `code` 和 `request_id`（如有）写入日志，随后由下方的「重新获取验证码」流程处理。
+- `url` 按填写的完整地址原样请求，不会自动追加路径。`api_key` 会在配置变更日志中脱敏，请勿提交到公开仓库。
+
 识别、校验或提交失败时，会重新获取验证码并重试，最多执行 `max_retries` 次。
+如果打码狗识别接口返回错误且错误信息包含“余额”，任务会按失败状态通过已配置的推送渠道发送“打码狗余额不足”通知。
 
 ### 每日调度
 
@@ -863,9 +891,10 @@ web:
 
 **密码说明：**
 
-- `host` 为 `127.0.0.1` 或 `localhost` 时，不需要密码，直接访问
-- `host` 为 `0.0.0.0` 或其他非本机地址时，必须设置密码才能使用
-- 首次访问会显示密码设置页面，输入后自动保存（存储为哈希值）
+- 实际启动时的监听地址决定认证模式；命令行 `--host` 会覆盖配置文件中的 `web.host`
+- 监听 `127.0.0.1`、`localhost` 或 `::1` 时，密码设置完成后无需登录，直接访问即可
+- 监听 `0.0.0.0` 或其他非本机地址时，必须通过密码认证才能使用
+- 密码为空时，首次访问会显示密码设置页面；密码至少需要 8 位，设置后自动保存（存储为哈希值）
 - 也可以在配置文件中直接填写明文密码，启动时会自动转换为哈希
 - 服务重启后需要重新输入密码
 
@@ -904,12 +933,37 @@ push:
       topic: ""
 ```
 
+### Server酱³
+
+注意：**Server酱³ 与 Server酱Turbo 是两套用户体系，SendKey 不通用**。本项目接的是 Server酱³（[sc3.ft07.com](https://sc3.ft07.com/)）。
+
+需要填写：
+
+- **SendKey**：在 [SendKey 页面](https://sc3.ft07.com/sendkey) 获取，形如 `sctp1234tXXXXXXXXXXXXXXXX`
+- **UID**：**可以留空**。官方文档写明 uid 就在 SendKey 的 `sctp{uid}t` 前缀里，本项目会自动解析；只有解析不出来时才需要手填
+
+示例：
+
+```yaml
+push:
+  channels:
+    - provider: serverchan
+      enable: true
+      sendkey: "sctp1234tXXXXXXXXXXXXXXXX"
+      uid: ""
+```
+
+推送地址为 `https://<uid>.push.ft07.com/send/<sendkey>.send`，用 `POST` + JSON 提交（`{"title": ..., "desp": ...}`，正文为 markdown，APP 内可渲染）。这样中文和换行都不需要手工 `urlencode`，也不会撞上 URL 长度限制。
+
+如果 HTTP 返回 200 但 `code` 不为 `0`（例如 SendKey 失效），控制台的「推送测试」会直接把这个错误信息显示出来。
+
 ### Telegram
 
 需要填写：
 
 - Bot Token
 - Chat ID
+- 自定义 API URL ，可留空
 
 示例：
 
@@ -920,7 +974,52 @@ push:
       enable: true
       token: "bot token"
       chat_id: "chat id"
+      api_url: ""
 ```
+
+### QQ 机器人（QQ 开放平台官方 Bot）
+
+> 这一项和上面的 `provider: qq` 完全无关。`qq` 走的是第三方 OneBot 框架的 HTTP API（需要自己搭 `push_url`），这里走的是 QQ 开放平台官方 OpenAPI，只需要 AppID 和 AppSecret。
+
+需要填写：
+
+- **AppID**：在 [QQ 开放平台](https://bot.q.qq.com/open) 机器人管理端获取
+- **AppSecret**：同上，注意不要泄露，配置文件里请勿提交到公开仓库
+- **私聊 OpenID / 群 OpenID**：可以**手动填写**；也可以点 Web 控制台里的「绑定私聊」/「绑定群聊」按钮自动获取并保存（见下方说明）
+- **消息格式**：纯文本或 Markdown，默认纯文本
+- **接口地址**：可留空，默认 `https://api.bot.qq.com`；使用沙箱环境时填 `https://sandbox.api.sgroup.qq.com`
+
+示例：
+
+```yaml
+push:
+  channels:
+    - provider: qqbot
+      enable: true
+      app_id: "102000000"
+      client_secret: "你的 AppSecret"
+      user_openid: ""        # 手动填写，或用「绑定私聊」按钮自动填入
+      group_openid: ""       # 手动填写，或用「绑定群聊」按钮自动填入
+      message_format: text   # text 或 markdown
+      api_base: ""           # 可留空
+```
+
+#### 自动绑定（可选）
+
+QQ 官方接口发送消息要把 `user_openid` / `group_openid` 填进 URL，这两个 ID 是**每个机器人不同**的，而且开放平台**没有提供查询接口**，只能在机器人收到消息或入群事件时被动拿到。如果你手上已经有这两个 ID，直接填进配置即可；没有的话可以用绑定按钮自动获取：
+
+1. 在「推送通道 - QQ 机器人」里填好 AppID 和 AppSecret，勾选启用
+2. 点「绑定私聊」：页面显示一个 6 位验证码，用 QQ 私聊机器人把这个验证码发出去，程序收到后自动把 `user_openid` 写进配置**并立即保存**
+3. 点「绑定群聊」：把机器人拉进群，或在群里 @机器人 发送页面上的验证码，同样会自动保存 `group_openid`
+
+两种情况都要在 90 秒内完成，超时后重新点一次即可。绑定过程中配置字段会暂时锁定（避免与自动保存冲突），绑定按钮旁边可以随时取消。绑定成功后页面会重新读取配置，显示的就是磁盘上保存的内容。
+
+#### 注意事项
+
+- **主动推送有限制**：QQ 官方对机器人的主动消息（用户没先说话就推送）有额度和频率限制，群聊还要求机器人在群里、并可能需要先申请主动消息权限。如果推送报错，先在 QQ 开放平台确认权限，或用「测试推送」单独排查这一条通道。
+- 私聊和群聊都配置时，两边都会发；只有一边发失败不会影响另一边，但失败原因会写进推送结果和日志。
+- 事件权限要在开放平台申请：私聊需要单聊事件权限，群聊需要群聊事件权限，没开通时绑定时会直接报错提示。
+- `access_token` 有效期 7200 秒，程序会自动缓存和刷新，不需要手动维护。
 
 ### 钉钉机器人
 
@@ -945,6 +1044,7 @@ push:
 需要填写：
 
 - Webhook
+- 加签 Secret，可留空
 
 示例：
 
@@ -954,6 +1054,28 @@ push:
     - provider: feishubot
       enable: true
       webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/..."
+      secret: "SEC..."
+```
+
+### 企业微信机器人
+
+需要填写：
+
+- Webhook
+
+可选开启页面中的「纯文本消息（兼容微信）」，对应 `plain_text: true`。开启后，签到及兑换通知使用普通文本，适用于微信端提示「暂不支持此消息类型」的情况；关闭或不配置时保持原有 Markdown 格式。普通文本最多 2048 个 UTF-8 字节，Markdown 最多 4096 个 UTF-8 字节，超长内容会优先按完整行自动分成多条、依次发送，单行过长时按 UTF-8 字符边界切分，保留完整内容。
+
+同一进程内，同一个机器人的发送间隔至少 3.1 秒，签到、兑换和网页测试共用节流；其他应用共用机器人时仍需注意总频率。发送中途失败会停止后续分条，并在推送结果中注明已成功发送的条数；不会自动重发，以免重复通知。
+
+示例：
+
+```yaml
+push:
+  channels:
+    - provider: wecombot
+      enable: true
+      webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+      plain_text: false  # 默认 Markdown；改为 true 使用普通文本
 ```
 
 ### 邮箱
@@ -984,6 +1106,32 @@ push:
 ```
 
 多个收件人通常可以用英文逗号分隔。
+
+### Gotify
+
+需要填写：
+
+- 服务器地址（Gotify 服务的访问地址，不含 `/message` 路径）
+- App Token（在 Gotify 后台创建应用后获得）
+
+示例：
+
+```yaml
+push:
+  channels:
+    - provider: gotify
+      enable: true
+      server: "https://gotify.example.com"
+      token: "你的 App Token"
+      priority: 5   # 优先级 0-10，可选，默认 5
+```
+
+消息正文使用 Markdown 格式，Gotify 原生支持。
+
+注意：
+
+- 服务器地址的 `http` / `https` 要和实际访问方式一致。程序不会跟随重定向，如果你的反向代理会把 `http` 跳转到 `https`，推送会报“服务器返回了重定向”，把地址改成 `https://...` 即可。
+- 优先级超出 0-10 会按边界处理，留空或填了非数字则使用默认值 5。
 
 ## 推荐使用流程
 
@@ -1039,7 +1187,7 @@ uv run python main.py serve --port 5891
 
 默认不会自动处理验证码。遇到验证码时会跳过该项并写入日志。可以稍后手动签到，或降低米游币任务使用频率。
 
-如果你有打码狗 `userkey`，可以在 Web 控制台开启验证码识别。项目只负责调用打码狗并按游戏社区签到、米游币社区签到两种不同方式提交结果。
+如果你有打码狗 `userkey` 或符合规范的自定义打码接口，可以在 Web 控制台开启验证码识别。项目只负责调用打码渠道并按游戏社区签到、米游币社区签到两种不同方式提交结果。
 
 ### 米游币任务失败，但游戏社区签到正常？
 
@@ -1064,7 +1212,7 @@ uv run python main.py serve --port 5891
 | --- | --- | --- |
 | [ ] | 补充更多游戏渠道签到 | -- |
 | [x] | 新增米游社其他功能，例如米游币兑换功能 | 2025-01 |
-| [ ] | 补充更多推送渠道 | -- |
+| [ ] | 补充更多推送渠道（已新增 QQ 开放平台官方机器人渠道） | -- |
 | [ ] | 优化签到流程，降低风控风险 | -- |
 | [ ] | 增加配置导入、导出功能 | -- |
 | [ ] | 完善产品文档 | -- |

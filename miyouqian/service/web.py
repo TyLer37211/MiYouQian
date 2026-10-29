@@ -12,6 +12,8 @@ import mimetypes
 import pathlib
 import secrets
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,16 +24,42 @@ import qrcode
 
 from ..auth.login import AigisRequired, CaptchaLogin, QRLogin, _QrRefreshed
 from ..core import cookies
-from ..core.config import load_config, log_path, normalize_config, save_config, validate_unique_account_uids
+from ..core.config import (
+    PUSH_CHANNEL_DEFAULTS,
+    PUSH_CHANNEL_FIELDS,
+    bind_shop_plan_accounts,
+    find_account_index_by_stuid,
+    load_config,
+    log_path,
+    normalize_config,
+    normalize_push_channels,
+    save_config,
+    validate_unique_account_uids,
+)
 from ..core.http import ApiClient
 from ..core.logs import append_log, configure_logger, format_line, print_startup_banner
+from ..core.profile import fetch_avatar_url
+from ..core.qq_bot import bind_openid as bind_qq_openid
+from ..core.qq_bot import generate_verify_code
 from ..tasks.shop_exchange import ShopExchange
 from .exchange_scheduler import ExchangeScheduler
-from .notifier import is_task_success, send_push, send_exchange_push, push_channels
+from .notifier import send_push, send_task_push, send_exchange_push, push_channels
 from .runner import run_tasks
 from .scheduler import DailyScheduler
 
 WEB_ROOT = pathlib.Path(__file__).resolve().parents[1] / "webui"
+
+# 标准库的 mimetypes 在部分环境（含 Docker 的 Python 3.11）不认识 .webp，
+# 不注册的话头像会被当成 application/octet-stream 发出去
+mimetypes.add_type("image/webp", ".webp")
+
+# QQ 官方机器人绑定 OpenID 的等待时间，和页面提示保持一致
+QQ_BIND_TIMEOUT = 90
+
+# 账号头像的缓存时间：取到的留一天，没取到的（网络、接口异常）过几分钟再试
+AVATAR_CACHE_SECONDS = 24 * 3600
+AVATAR_RETRY_SECONDS = 300
+AVATAR_MAX_UIDS = 20
 
 # ---------------------------------------------------------------------------
 # 密码认证工具
@@ -58,9 +86,11 @@ def is_external_host(host: str) -> bool:
 
 
 class WebApp:
-    def __init__(self, config_path: pathlib.Path) -> None:
+    def __init__(self, config_path: pathlib.Path, host: str = "127.0.0.1", port: int = 5890) -> None:
         self.config_path = config_path
         self.config = load_config(config_path)
+        self.host = host
+        self.port = port
         self._ensure_password_hashed()
         self.log_file = log_path(config_path, self.config)
         configure_logger(self.log_file)
@@ -70,6 +100,8 @@ class WebApp:
         self._qr_refresh = threading.Event()
         self._login_cancel = threading.Event()
         self._login_generation = 0
+        self.qq_bind_state: dict[str, Any] = {"running": False, "status": "idle"}
+        self._qq_bind_cancel = threading.Event()
         self.scheduler = DailyScheduler(self.config, self.run_all, lambda message: self.log(message, "scheduler"))
         self.exchange_scheduler = ExchangeScheduler(
             self.config,
@@ -77,6 +109,8 @@ class WebApp:
             lambda message: self.log(message, "exchange"),
         )
         self._sessions: dict[str, float] = {}
+        # uid -> (过期时间, 头像地址)，空地址表示这次没取到
+        self._avatar_cache: dict[str, tuple[float, str]] = {}
 
     def _ensure_password_hashed(self) -> None:
         web = self.config.get("web", {})
@@ -87,8 +121,11 @@ class WebApp:
 
     @property
     def need_auth(self) -> bool:
-        web = self.config.get("web", {})
-        return is_external_host(str(web.get("host", "127.0.0.1")))
+        # 为了保证不会因为命令行参数、配置文件在无意间被调整导致 Web 控制台泄露到本机之外，要求首次访问 Web 控制台时必须设置一个外网访问密码
+        stored_hash = self.config.get("web", {}).get("password", "")
+        if not stored_hash:
+            return True
+        return is_external_host(str(self.host))
 
     @property
     def password_is_set(self) -> bool:
@@ -111,12 +148,10 @@ class WebApp:
             self._sessions.pop(token, None)
 
     def auth_setup(self, password: str) -> str:
-        if not self.need_auth:
-            raise ValueError("当前为内网模式，无需设置密码")
         if self.password_is_set:
             raise ValueError("密码已设置，不能重复设置")
-        if len(password) < 4:
-            raise ValueError("密码长度至少 4 位")
+        if len(password) < 8:
+            raise ValueError("密码长度至少 8 位")
         with self.lock:
             self.config.setdefault("web", {})["password"] = hash_password(password)
             save_config(self.config_path, self.config)
@@ -171,20 +206,32 @@ class WebApp:
                 self.log(push_result, "push")
             raise
         self.log("任务编排完成，准备发送推送", "task")
-        push_result = send_push(config, "米游签任务完成", "\n".join(lines), success=is_task_success(lines))
+        push_result = send_task_push(config, lines)
         if push_result:
             self.log(push_result, "push")
         return []
 
-    def test_push_channels(self) -> str:
+    def test_push_channels(self, channel: dict[str, Any] | None = None) -> str:
         with self.lock:
             config = copy.deepcopy(self.config)
-        channels = push_channels(config.get("push") or {})
-        if not channels:
-            raise ValueError("请先启用至少一个推送通道")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = f"这是一条推送测试消息\n发送时间: {now}\n如收到消息，说明该通道可用"
-        result = send_push(config, "米游签推送测试", message, success=False)
+        if isinstance(channel, dict) and channel.get("provider"):
+            # 弹窗里的参数可能还没保存，测试直接用它算出来的通道。
+            # 这里拼一份只含该通道、总开关打开的临时配置，复用普通的 send_push，
+            # 不依赖 notifier 额外参数，旧版 notifier 也能正常工作。
+            targets = normalize_push_channels({"channels": [channel]})
+            if not targets:
+                raise ValueError("请先填写该通道的参数")
+            # send_push 只会发 enable 的通道，这里强制标记一下
+            for target in targets:
+                target["enable"] = True
+            scoped = {"push": {"enable": True, "error_only": False, "channels": targets}}
+            result = send_push(scoped, "米游签推送测试", message, success=False)
+        else:
+            if not push_channels(config.get("push") or {}):
+                raise ValueError("请先启用至少一个推送通道")
+            result = send_push(config, "米游签推送测试", message, success=False)
         if result:
             self.log(result, "push")
         return result or "推送测试已完成"
@@ -215,6 +262,7 @@ class WebApp:
             old_config = copy.deepcopy(self.config)
             preserve_push_channel_secrets(old_config, payload)
             normalize_config(payload)
+            bind_shop_plan_accounts(payload)
             changes = diff_config(old_config, payload)
             self.config = payload
             save_config(self.config_path, self.config)
@@ -222,6 +270,9 @@ class WebApp:
             configure_logger(self.log_file)
             self.scheduler.reload(self.config)
             self.exchange_scheduler.reload(self.config)
+            # AppID/AppSecret 可能刚被改过，正在跑的绑定用的还是旧凭证，结果不可信
+            if self.qq_bind_state.get("running"):
+                self._qq_bind_cancel.set()
         visible_changes = [change for change in changes if should_log_config_change(*change)]
         if visible_changes:
             self.log(f"配置已保存，共 {len(visible_changes)} 项变更", "config")
@@ -234,6 +285,31 @@ class WebApp:
                 self.log(f"配置项变更过多，已省略 {len(visible_changes) - 50} 项", "config")
         else:
             self.log("配置已保存，未检测到配置项变化", "config")
+
+    def account_avatars(self, uids: list[str]) -> dict[str, Any]:
+        """账号在米游社的头像地址。纯展示用，取不到的账号不出现在结果里，页面继续用默认头像。"""
+        uids = list(dict.fromkeys(uid for uid in uids if uid.isascii() and uid.isdigit() and len(uid) <= 20))
+        uids = uids[:AVATAR_MAX_UIDS]
+        now = time.monotonic()
+        with self.lock:
+            cached = {uid: self._avatar_cache[uid] for uid in uids if uid in self._avatar_cache}
+        pending = [uid for uid in uids if uid not in cached or cached[uid][0] <= now]
+        fresh: dict[str, tuple[float, str]] = {}
+        if pending:
+            def lookup(uid: str) -> tuple[str, tuple[float, str]]:
+                try:
+                    return uid, (now + AVATAR_CACHE_SECONDS, fetch_avatar_url(client, uid))
+                except Exception as exc:
+                    self.log(f"账号头像获取失败: {uid}，{exc}", "web")
+                    return uid, (now + AVATAR_RETRY_SECONDS, "")
+
+            # 网络差时单个请求可能要等很久（比如 IPv6 不通要先等超时），并发取免得账号越多越慢
+            with ApiClient(timeout=8.0) as client, ThreadPoolExecutor(max_workers=min(len(pending), 5)) as pool:
+                fresh = dict(pool.map(lookup, pending))
+            with self.lock:
+                self._avatar_cache.update(fresh)
+        known = {**cached, **fresh}
+        return {"avatars": {uid: known[uid][1] for uid in uids if known[uid][1]}}
 
     def shop_goods(self, game: str = "") -> dict[str, Any]:
         game_label = game or "全部分区"
@@ -312,10 +388,11 @@ class WebApp:
             return result
 
     def shop_exchange_once(self, plan: dict[str, Any], on_progress: Callable[[int, str], None] | None = None) -> dict[str, Any]:
-        account = self._account_by_index(int(plan.get("account_index") or 0))
+        account = self._account_by_index(self._plan_account_index(plan))
         account_name = display_account_name(account)
         goods_name = str(plan.get("goods_name") or plan.get("goods_id") or "未知商品")
-        self.log(f"开始商品兑换: {goods_name}，账号 {account_name}", "exchange")
+        log_prefix = f"【账号 {account_name}｜商品 {goods_name}】"
+        self.log(f"{log_prefix}开始商品兑换", "exchange")
         if not str(plan.get("device_fp") or "").strip():
             raise ValueError("兑换计划缺少 device_fp，请重新添加计划")
         with self.lock:
@@ -326,13 +403,13 @@ class WebApp:
                     client,
                     config,
                     account,
-                    emit=lambda message: self.log(message, "exchange"),
+                    emit=lambda message: self.log(f"{log_prefix}{message}", "exchange"),
                 ).exchange_with_retry(plan, on_progress=on_progress)
         except Exception as exc:
-            self.log(f"商品兑换请求异常: {goods_name}，账号 {account_name}，{exc}", "exchange")
+            self.log(f"{log_prefix}商品兑换请求异常: {exc}", "exchange")
             raise
         summary = f"{result.get('message', '未知结果')}({result.get('retcode')})，请求 {result.get('attempt', 1)} 次"
-        self.log(f"商品兑换结束: {goods_name}，账号 {account_name}，{summary}", "exchange")
+        self.log(f"{log_prefix}商品兑换结束: {summary}", "exchange")
         return result
 
     def shop_exchange_plan_once(self, plan_index: int) -> dict[str, Any]:
@@ -447,21 +524,30 @@ class WebApp:
             else:
                 title = "❌ 商品兑换失败"
 
-            # 从 account_index 获取账号信息，添加到 plan 中
+            # 获取计划所属账号信息，添加到 plan 中
             plan_with_account = dict(plan)
-            account_index = plan.get("account_index")
-            if account_index is not None:
-                try:
-                    account = self._account_by_index(int(account_index))
-                    plan_with_account["account"] = display_account_name(account)
-                except Exception:
-                    plan_with_account["account"] = "未知账号"
+            try:
+                account = self._account_by_index(self._plan_account_index(plan))
+                plan_with_account["account"] = display_account_name(account)
+            except Exception:
+                plan_with_account["account"] = "未知账号"
 
             push_result = send_exchange_push(config, title, goods_name, result, plan_with_account, success=is_success)
             if push_result:
                 self.log(f"商品兑换推送已发送: {push_result}", "exchange")
         except Exception as exc:
             self.log(f"商品兑换推送发送失败: {exc}", "exchange")
+
+    def _plan_account_index(self, plan: dict[str, Any]) -> int:
+        """兑换计划所属账号在当前列表里的下标：优先按 stuid 找，避免账号列表变动后指向别的账号。"""
+        stuid = str(plan.get("account_stuid") or "").strip()
+        if not stuid:
+            return int(plan.get("account_index") or 0)
+        with self.lock:
+            index = find_account_index_by_stuid(self.config.get("accounts") or [], stuid)
+        if index is None:
+            raise ValueError("兑换计划所属账号已不存在，请重新选择执行账号")
+        return index
 
     def _account_by_index(self, account_index: int) -> dict[str, Any]:
         with self.lock:
@@ -618,10 +704,13 @@ class WebApp:
                 account["name"] = account_data["stuid"]
             if not draft:
                 self.config["accounts"][account_index] = account
+                # 这个位置换成了另一个米游社账号时，绑定旧账号的兑换计划要停用，不能改用新账号的 cookie
+                bind_shop_plan_accounts(self.config)
                 save_config(self.config_path, self.config)
                 self.log_file = log_path(self.config_path, self.config)
                 configure_logger(self.log_file)
                 self.scheduler.reload(self.config)
+                self.exchange_scheduler.reload(self.config)
         return account
 
     def _login_worker(
@@ -736,6 +825,120 @@ class WebApp:
         self._login_cancel.set()
         self.log("登录流程已取消", "auth")
 
+    # ------------------------------------------------------------------
+    # QQ 官方机器人 OpenID 绑定
+    #
+    # QQ 开放平台不提供查询 user_openid / group_openid 的接口，只能在机器人收到
+    # 消息或入群事件时被动获取，所以这里起一个线程连网关等用户发验证码。
+    # ------------------------------------------------------------------
+    def start_qq_bind(self, payload: dict[str, Any]) -> None:
+        target = str(payload.get("target") or "user").strip().lower()
+        if target not in ("user", "group"):
+            raise ValueError("绑定目标只能是 user 或 group")
+        app_id = str(payload.get("app_id") or "").strip()
+        client_secret = str(payload.get("client_secret") or "").strip()
+        api_base = str(payload.get("api_base") or "").strip()
+        if not app_id:
+            raise ValueError("请先填写 AppID")
+        if not client_secret:
+            raise ValueError("请先填写 AppSecret")
+
+        with self.lock:
+            if self.qq_bind_state.get("running"):
+                raise RuntimeError("已有 QQ 绑定正在进行，请等待或取消")
+            self._qq_bind_cancel.clear()
+            # 验证码在这里生成并立刻返回给页面，用户看到后才有东西可发
+            self.qq_bind_state = {
+                "running": True,
+                "status": "starting",
+                "target": target,
+                "message": "正在连接 QQ 网关",
+                "verify_code": generate_verify_code(),
+                "openid": "",
+            }
+            verify_code = str(self.qq_bind_state["verify_code"])
+        thread = threading.Thread(
+            target=self._qq_bind_worker,
+            args=(target, app_id, client_secret, api_base, verify_code),
+            name="miyouqian-web-qq-bind",
+            daemon=True,
+        )
+        thread.start()
+        self.log(f"开始绑定 QQ {'群聊' if target == 'group' else '私聊'} OpenID", "push")
+
+    def _qq_bind_worker(
+        self,
+        target: str,
+        app_id: str,
+        client_secret: str,
+        api_base: str,
+        verify_code: str,
+    ) -> None:
+        def on_event(message: str) -> None:
+            with self.lock:
+                self.qq_bind_state.update({"message": message})
+
+        try:
+            openid = bind_qq_openid(
+                app_id=app_id,
+                client_secret=client_secret,
+                verify_code=verify_code,
+                target=target,
+                api_base=api_base,
+                timeout=QQ_BIND_TIMEOUT,
+                on_event=on_event,
+                cancel=self._qq_bind_cancel.is_set,
+            )
+            field = "group_openid" if target == "group" else "user_openid"
+            # 绑定过程中配置可能已经被改过（改 AppID/AppSecret 会让结果作废），此时不再落盘
+            if self._qq_bind_cancel.is_set():
+                raise RuntimeError("绑定已取消")
+            # 把绑定到的 OpenID 写回配置，省得用户再从日志里手抄一遍
+            with self.lock:
+                channel = ensure_push_channel(self.config, "qqbot")
+                channel[field] = openid
+                channel["app_id"] = app_id
+                channel["client_secret"] = client_secret
+                if api_base:
+                    channel["api_base"] = api_base
+                normalize_config(self.config)
+                save_config(self.config_path, self.config)
+                self.qq_bind_state = {
+                    "running": False,
+                    "status": "success",
+                    "target": target,
+                    "message": "绑定成功，已保存到配置",
+                    "verify_code": verify_code,
+                    "openid": openid,
+                    "field": field,
+                }
+        except Exception as exc:
+            with self.lock:
+                self.qq_bind_state = {
+                    "running": False,
+                    "status": "error",
+                    "target": target,
+                    "message": str(exc),
+                    "verify_code": verify_code,
+                    "openid": "",
+                }
+            self.log(f"绑定 QQ OpenID 失败: {exc}", "push")
+            return
+        self.log(f"绑定 QQ OpenID 成功: {openid}", "push")
+
+    def qq_bind_status(self) -> dict[str, Any]:
+        with self.lock:
+            return dict(self.qq_bind_state)
+
+    def cancel_qq_bind(self) -> None:
+        with self.lock:
+            if not self.qq_bind_state.get("running"):
+                raise RuntimeError("当前没有进行中的 QQ 绑定")
+            # 只置取消标志，最终状态交给 worker 收尾，避免两边同时改状态互相覆盖
+            self.qq_bind_state["message"] = "正在取消绑定"
+        self._qq_bind_cancel.set()
+        self.log("已请求取消 QQ OpenID 绑定", "push")
+
 
 def make_qr_data_uri(text: str) -> str:
     image = qrcode.make(text)
@@ -765,6 +968,21 @@ def find_duplicate_uid(accounts: list[dict[str, Any]], uid: str, exclude_index: 
         if str(account.get("stuid") or "").strip() == uid:
             return index
     return None
+
+
+def ensure_push_channel(config: dict[str, Any], provider: str) -> dict[str, Any]:
+    """取出推送通道，不存在就按默认字段建一个并写回配置。"""
+    push = config.setdefault("push", {})
+    channels = push.setdefault("channels", [])
+    for channel in channels:
+        if isinstance(channel, dict) and str(channel.get("provider") or "") == provider:
+            return channel
+    fields = PUSH_CHANNEL_FIELDS.get(provider, ())
+    channel: dict[str, Any] = {"provider": provider, "enable": True}
+    for field in fields:
+        channel[field] = PUSH_CHANNEL_DEFAULTS.get(provider, {}).get(field, "")
+    channels.append(channel)
+    return channel
 
 
 def preserve_push_channel_secrets(old_config: dict[str, Any], new_config: dict[str, Any]) -> None:
@@ -891,7 +1109,9 @@ def is_sensitive_config_path(path: str) -> bool:
         "tokens",
         "webhook",
         "userkey",
+        "api_key",
         "secret",
+        "client_secret",
         "password",
         "smtp_password",
         "fp",
@@ -944,6 +1164,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/status":
                 self.send_json(self.app.status())
                 return
+            if path == "/api/account/avatars":
+                uids = [uid.strip() for uid in first_query(query, "uids").split(",")]
+                self.send_json(self.app.account_avatars(uids))
+                return
             if path == "/api/shop/goods":
                 self.send_json(self.app.shop_goods(str(first_query(query, "game"))))
                 return
@@ -957,6 +1181,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/shop/device-fp":
                 self.send_json(self.app.ensure_shop_device_fp())
+                return
+            if path == "/api/qqbot/bind/status":
+                self.send_json(self.app.qq_bind_status())
                 return
             self.serve_static(path)
         except Exception as exc:
@@ -982,8 +1209,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
                 return
             if path == "/api/push/test":
-                result = self.app.test_push_channels()
-                self.send_json({"ok": True, "result": result})
+                channel = payload.get("channel") if isinstance(payload, dict) else None
+                result = self.app.test_push_channels(channel)
+                # single 让页面能判断服务端是否已支持「只测单条通道」
+                self.send_json(
+                    {"ok": True, "result": result, "single": isinstance(channel, dict)}
+                )
+                return
+            if path == "/api/qqbot/bind":
+                self.app.start_qq_bind(payload)
+                self.send_json({"ok": True, **self.app.qq_bind_status()})
+                return
+            if path == "/api/qqbot/bind/cancel":
+                self.app.cancel_qq_bind()
+                self.send_json({"ok": True})
                 return
             if path == "/api/run":
                 self.app.log("收到手动执行请求", "web")
@@ -1148,13 +1387,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(config_path: pathlib.Path, host: str, port: int) -> None:
-    app = WebApp(config_path)
+    app = WebApp(config_path, host, port)
     Handler.app = app
     print_startup_banner("MYQ")
     app.log(f"正在启动 Web 控制台，配置文件: {config_path.resolve()}", "startup")
-    if app.need_auth and not app.password_is_set:
-        app.log("外网模式已启用，首次访问时请设置访问密码", "auth")
+    if not app.password_is_set:
+        app.log("您尚未设置外网访问密码！首次访问 Web 控制台时请您妥善设置并保管外网访问密码！", "auth")
+    if host in ("127.0.0.1", "localhost", "::1"):
+        app.log("您设置了仅监听本机，访问 Web 控制台时将不校验外网访问密码，请您知悉。", "auth")
+    else:
+        app.log("您设置了监听外网，访问 Web 控制台时将校验外网访问密码，请您妥善设置并保管外网访问密码！", "auth")
     server, actual_port = create_server(host, port)
+    app.port = actual_port
     if actual_port != port:
         app.log(f"端口 {port} 被占用，已切换到 {actual_port}", "startup")
     app.start()

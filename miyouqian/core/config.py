@@ -42,7 +42,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "captcha": {
         "enable": False,
         "max_retries": 3,
-        "channels": [{"provider": "damagou", "enable": False, "userkey": "", "type": "", "timeout": 60}],
+        "channels": [
+            {"provider": "damagou", "enable": False, "userkey": "", "type": "", "timeout": 60},
+            {"provider": "custom", "enable": False, "url": "", "api_key": "", "timeout": 120},
+        ],
     },
     "schedule": {"enable": False, "time": "09:00", "jitter_minutes": 45, "run_on_start": False},
     "games": {
@@ -95,6 +98,7 @@ def load_config(path: str | pathlib.Path) -> dict[str, Any]:
     normalize_config(config)
     merge_credentials(config, load_credentials(config_path, config))
     normalize_config(config)
+    bind_shop_plan_accounts(config)
     return config
 
 
@@ -182,6 +186,17 @@ def normalize_config(config: dict[str, Any]) -> None:
         bbs = {}
         config["bbs"] = bbs
     bbs["checkin"] = parse_bool(bbs.get("checkin", True))
+    raw_forums = bbs.get("forums")
+    if isinstance(raw_forums, list):
+        forums: list[int] = []
+        for item in raw_forums:
+            try:
+                forums.append(int(item))
+            except (TypeError, ValueError):
+                continue
+    else:
+        forums = list(DEFAULT_CONFIG["bbs"]["forums"])
+    bbs["forums"] = forums
     bbs["read"] = False
     bbs["like"] = False
     bbs["share"] = False
@@ -221,6 +236,7 @@ def normalize_shop_exchange(config: dict[str, Any]) -> None:
             "enable": parse_bool(raw.get("enable", True)),
             "auto": parse_bool(raw.get("auto", True)),
             "account_index": account_index,
+            "account_stuid": str(raw.get("account_stuid") or "").strip(),
             "goods_id": str(raw.get("goods_id") or "").strip(),
             "goods_name": str(raw.get("goods_name") or raw.get("name") or "").strip(),
             "icon": str(raw.get("icon") or ""),
@@ -267,15 +283,53 @@ def normalize_cloud_game_enabled(value: Any) -> list[str]:
 
 PUSH_CHANNEL_FIELDS: dict[str, tuple[str, ...]] = {
     "pushplus": ("token", "topic"),
+    # Server酱³（sc3.ft07.com）：SendKey 形如 sctp1234tXXXX，uid 可留空（会从 SendKey 前缀解析）
+    "serverchan": ("sendkey", "uid"),
     "qq": ("push_url", "access_token", "send_id", "msg_type"),
-    "telegram": ("token", "chat_id"),
+    # QQ 开放平台官方机器人：与上面的 onebot 版 qq 通道无关，
+    # user_openid / group_openid 只能通过 Web 控制台的「绑定」按钮获取
+    "qqbot": ("app_id", "client_secret", "user_openid", "group_openid", "message_format", "api_base"),
+    "telegram": ("token", "chat_id", "api_url"),
     "dingrobot": ("webhook", "secret"),
-    "feishubot": ("webhook",),
+    "feishubot": ("webhook", "secret"),
+    "wecombot": ("webhook", "plain_text"),
     "email": ("smtp_host", "smtp_port", "smtp_user", "smtp_password", "mail_from", "mail_to", "smtp_ssl"),
+    "gotify": ("server", "token", "priority"),
 }
 
+# 通道字段的默认值：取值等于默认值不算「已配置」。
+# Web 控制台的 app.js 里有一份对应的 pushChannelDefaults，测试会校验两边一致。
+PUSH_CHANNEL_DEFAULTS: dict[str, dict[str, Any]] = {
+    "qqbot": {"message_format": "text"},
+    "gotify": {"priority": 5},
+}
+
+
+def normalize_gotify_priority(value: Any) -> int:
+    """Gotify 优先级取 0-10 的整数；空值和非数字用默认值，越界按边界算。
+
+    不能用 `value or 默认值`：0 是合法的最低优先级，会被当成空值吞掉。
+    """
+    try:
+        priority = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return PUSH_CHANNEL_DEFAULTS["gotify"]["priority"]
+    return max(0, min(10, priority))
+
+
 def normalize_push_channels(push: dict[str, Any]) -> list[dict[str, Any]]:
-    allowed = {"pushplus", "telegram", "dingrobot", "feishubot", "email", "qq"}
+    allowed = {
+        "pushplus",
+        "serverchan",
+        "telegram",
+        "dingrobot",
+        "feishubot",
+        "wecombot",
+        "email",
+        "qq",
+        "qqbot",
+        "gotify",
+    }
     raw_channels = push.get("channels")
     if not isinstance(raw_channels, list):
         raw_channels = []
@@ -293,13 +347,20 @@ def normalize_push_channels(push: dict[str, Any]) -> list[dict[str, Any]]:
             "provider": provider,
             "enable": parse_bool(raw.get("enable", push.get("enable", False))),
         }
+        defaults = PUSH_CHANNEL_DEFAULTS.get(provider, {})
         for field in PUSH_CHANNEL_FIELDS[provider]:
             if field == "smtp_port":
                 channel[field] = int(raw.get(field) or 465)
             elif field == "smtp_ssl":
                 channel[field] = parse_bool(raw.get(field, True))
+            elif field == "plain_text":
+                channel[field] = parse_bool(raw.get(field, False))
+            elif field == "message_format":
+                channel[field] = "markdown" if str(raw.get(field) or "").strip().lower() == "markdown" else "text"
+            elif field == "priority":
+                channel[field] = normalize_gotify_priority(raw.get(field))
             else:
-                channel[field] = str(raw.get(field) or "")
+                channel[field] = str(raw.get(field) or defaults.get(field, ""))
         if should_keep_push_channel(channel):
             channels.append(channel)
     return channels
@@ -309,11 +370,22 @@ def should_keep_push_channel(channel: dict[str, Any]) -> bool:
     if channel.get("enable"):
         return True
     provider = str(channel.get("provider") or "")
+    defaults = PUSH_CHANNEL_DEFAULTS.get(provider, {})
     for field in PUSH_CHANNEL_FIELDS.get(provider, ()):
         if field == "smtp_ssl":
             continue
+        if field == "plain_text":
+            if channel.get(field):
+                return True
+            continue
         if field == "smtp_port":
             if int(channel.get(field) or 465) != 465:
+                return True
+            continue
+        # 只有非默认取值才算「已配置」，避免默认的 message_format=text、priority=5 让空通道一直被保留
+        if field in defaults:
+            value = channel.get(field)
+            if value not in (None, "") and str(value) != str(defaults[field]):
                 return True
             continue
         if str(channel.get(field) or "").strip():
@@ -321,8 +393,14 @@ def should_keep_push_channel(channel: dict[str, Any]) -> bool:
     return False
 
 
+def default_captcha_channel(provider: str) -> dict[str, Any]:
+    if provider == "custom":
+        return {"provider": "custom", "enable": False, "url": "", "api_key": "", "timeout": 120}
+    return {"provider": "damagou", "enable": False, "userkey": "", "type": "", "timeout": 60}
+
+
 def normalize_captcha_channels(captcha: dict[str, Any]) -> list[dict[str, Any]]:
-    allowed = {"damagou"}
+    allowed = ("damagou", "custom")
     raw_channels = captcha.get("channels")
     if not isinstance(raw_channels, list):
         raw_channels = []
@@ -338,22 +416,27 @@ def normalize_captcha_channels(captcha: dict[str, Any]) -> list[dict[str, Any]]:
         if provider not in allowed or provider in seen:
             continue
         seen.add(provider)
+        default_timeout = default_captcha_channel(provider)["timeout"]
         try:
-            timeout = max(float(raw.get("timeout") or 60), 1)
+            timeout = max(float(raw.get("timeout") or default_timeout), 1)
             normalized_timeout: int | float = int(timeout) if timeout.is_integer() else timeout
         except (TypeError, ValueError):
-            normalized_timeout = 60
-        channels.append(
-            {
-                "provider": provider,
-                "enable": parse_bool(raw.get("enable", captcha.get("enable", False))),
-                "userkey": str(raw.get("userkey") or ""),
-                "type": str(raw.get("type") or ""),
-                "timeout": normalized_timeout,
-            }
-        )
-    if not any(channel["provider"] == "damagou" for channel in channels):
-        channels.append({"provider": "damagou", "enable": False, "userkey": "", "type": "", "timeout": 60})
+            normalized_timeout = default_timeout
+        channel: dict[str, Any] = {
+            "provider": provider,
+            "enable": parse_bool(raw.get("enable", captcha.get("enable", False))),
+        }
+        if provider == "custom":
+            channel["url"] = str(raw.get("url") or "").strip()
+            channel["api_key"] = str(raw.get("api_key") or "").strip()
+        else:
+            channel["userkey"] = str(raw.get("userkey") or "")
+            channel["type"] = str(raw.get("type") or "")
+        channel["timeout"] = normalized_timeout
+        channels.append(channel)
+    for provider in allowed:
+        if provider not in seen:
+            channels.append(default_captcha_channel(provider))
     return channels
 
 
@@ -379,6 +462,44 @@ def validate_unique_account_uids(config: dict[str, Any]) -> None:
         if uid in seen:
             raise ValueError(f"UID {uid} 已存在于账号 {seen[uid]}，不能重复添加同一账号")
         seen[uid] = index
+
+
+def find_account_index_by_stuid(accounts: list[dict[str, Any]], stuid: str) -> int | None:
+    stuid = str(stuid or "").strip()
+    if not stuid:
+        return None
+    for index, account in enumerate(accounts):
+        if str(account.get("stuid") or "").strip() == stuid:
+            return index
+    return None
+
+
+def bind_shop_plan_accounts(config: dict[str, Any]) -> None:
+    """让兑换计划跟着账号走，而不是跟着账号在列表里的下标走。
+
+    计划里的 account_index 只是账号列表下标，删除或重排账号后会悄悄指向另一个账号，
+    而 uid/region 仍是原账号的角色。这里按 account_stuid 重新算下标；
+    还没有 account_stuid 的旧计划按当前下标补上；找不到对应账号的计划直接停用。
+    stuid 存在凭证文件里，所以必须在凭证合并之后调用，否则会把所有计划都当成账号已删除。
+    """
+    accounts = config.get("accounts") or []
+    # 没有任何账号带 stuid（凭证文件缺失或都未登录）时没有可比对的标识，保持原样
+    if not any(str(account.get("stuid") or "").strip() for account in accounts):
+        return
+    plans = (config.get("shop_exchange") or {}).get("plans") or []
+    for plan in plans:
+        stuid = str(plan.get("account_stuid") or "").strip()
+        if not stuid:
+            index = plan.get("account_index", 0)
+            if isinstance(index, int) and 0 <= index < len(accounts):
+                plan["account_stuid"] = str(accounts[index].get("stuid") or "").strip()
+            continue
+        index = find_account_index_by_stuid(accounts, stuid)
+        if index is not None:
+            plan["account_index"] = index
+        elif plan.get("enable", True):
+            plan["enable"] = False
+            plan["last_result"] = "所属账号已删除或更换，计划已停用"
 
 
 def find_account(config: dict[str, Any], name: str | None = None) -> dict[str, Any]:

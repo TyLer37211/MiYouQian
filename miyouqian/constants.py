@@ -37,6 +37,7 @@ BBS_SHARE_URL = f"{BBS_API}/apihub/api/getShareConf"
 BBS_LIKE_URL = f"{BBS_API}/post/api/post/upvote"
 BBS_CREATE_VERIFICATION_URL = f"{BBS_API}/misc/api/createVerification?is_high=true"
 BBS_VERIFY_VERIFICATION_URL = f"{BBS_API}/misc/api/verifyVerification"
+BBS_USER_INFO_URL = f"{BBS_API}/user/api/getUserFullInfo"
 
 MALL_POINT_URL = f"{TAKUMI_API}/common/homutreasure/v1/web/user/point"
 MALL_GOODS_LIST_URL = f"{TAKUMI_API}/mall/v1/web/goods/list"
@@ -159,4 +160,5 @@ BBS_FORUMS = {
     5: {"id": "5", "forum_id": "34", "name": "大别野"},
     6: {"id": "6", "forum_id": "52", "name": "崩坏：星穹铁道"},
     8: {"id": "8", "forum_id": "57", "name": "绝区零"},
+    9: {"id": "9", "forum_id": "948", "name": "崩坏：因缘精灵"},
 }
